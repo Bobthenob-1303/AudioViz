@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BeatBox</title>
+
+
+
+<style>
+
+    @font-face {
+    font-family: "TypeMachine";
+    src: url("Type Machine.ttf") format("truetype");
+}
+  :root{
+    --bg:#0a0a0c;
+    --cell-off:#16161a;
+    --cell-border:#232329;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    height:100%;
+    margin:0;
+    background:var(--bg);
+    color:#e8e8ea;
+    font-family:"Type Mach"
+  }
+  body{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:flex-start;
+    min-height:100%;
+    padding:20px 14px 32px;
+    gap:14px;
+  }
+  h1{
+    font-size:100px;
+    font-weight:600;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    color:#9a9aa2;
+    margin:4px 0 0;
+    text-align:center;
+    font-family: "TypeMachine", sans-serif;
+  }
+  #controls{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    justify-content:center;
+    align-items:center;
+  }
+  button{
+    background:#1c1c22;
+    border:1px solid #33333c;
+    color:#f2f2f4;
+    padding:20px 36px;
+    border-radius:12px;
+    font-size:20px;
+    cursor:pointer;
+    font-family: "TypeMachine", sans-serif;
+}
+
+
+  button:hover, .fileBtn:hover{background:#25252d;}
+  button:active, .fileBtn:active{transform:scale(.97);}
+  button.active{
+    background:#232a23;
+    border-color:#3c5c3c;
+    color:#c9f5c9;
+  }
+  #fileInput{display:none;}
+
+  #dropZone{
+    width:min(96vw, 820px);
+    min-height:120px;
+    border:2px dashed #3a3a44;
+    border-radius:14px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    padding:24px;
+    font-size:16px;
+    color:#9a9aa2;
+    background:#111115;
+    cursor:pointer;
+    transition:border-color .15s ease, background .15s ease, color .15s ease;
+  }
+
+  #dropZone:hover,
+  #dropZone.dragover{
+    border-color:#666674;
+    background:#17171d;
+    color:#f2f2f4;
+  }
+
+  #status{
+    font-size:12px;
+    color:#6c6c74;
+    min-height:14px;
+    text-align:center;
+  }
+  #player{
+    width:min(96vw, 820px);
+  }
+  #player audio{
+    width:100%;
+  }
+  #grid{
+    display:grid;
+    grid-template-columns:repeat(16, 1fr);
+    grid-template-rows:repeat(16, 1fr);
+    gap:5px;
+    width:min(96vw, 820px);
+    aspect-ratio:1/1;
+    padding:12px;
+    background:#000;
+    border-radius:14px;
+    border:1px solid #1c1c22;
+  }
+  .cell{
+    background:var(--cell-off);
+    border:1px solid var(--cell-border);
+    border-radius:5px;
+    transition:background-color 60ms linear, box-shadow 60ms linear;
+  }
+</style>
+</head>
+<body>
+  <h1>BeatBox</h1>
+  <div id="controls">
+    <button id="micBtn">Start Mic</button>
+    <button id="stopBtn">Stop</button>
+  </div>
+  <div id="status">Idle</div>
+  <div id="player" style="display:none;">
+    <audio id="audioEl" controls></audio>
+  </div>
+  <div id="grid"></div>
+  <div id="dropZone">Drag & drop an audio file here, or click to upload</div>
+  <input type="file" id="fileInput" accept=".wav,audio/wav,audio/*">
+
+<script>
+(function(){
+  const GRID_SIZE = 16;
+  const grid = document.getElementById('grid');
+  const micBtn = document.getElementById('micBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const fileInput = document.getElementById('fileInput');
+  const dropZone = document.getElementById('dropZone');
+  const statusEl = document.getElementById('status');
+  const playerWrap = document.getElementById('player');
+  const audioEl = document.getElementById('audioEl');
+
+  // Build grid cells
+  const cells = [];
+  for(let r=0;r<GRID_SIZE;r++){
+    const rowArr = [];
+    for(let c=0;c<GRID_SIZE;c++){
+      const div = document.createElement('div');
+      div.className = 'cell';
+      grid.appendChild(div);
+      rowArr.push(div);
+    }
+    cells.push(rowArr);
+  }
+
+  // 7 bands mapped across 16 columns
+  // "sens" scales each band's measured level before it's drawn.
+  // Lower it to make a band less reactive, raise it to make it more reactive.
+ const bands = [
+    { name:'sub-bass',   lo:20,   hi:60,    cols:[0,1],     sens:0.08 },
+    { name:'bass',       lo:60,   hi:250,   cols:[2,3],     sens:0.15 },
+    { name:'low-mids',   lo:250,  hi:500,   cols:[4,5],     sens:0.35 },
+    { name:'mids',       lo:500,  hi:2000,  cols:[6,7,8],   sens:0.75 },
+    { name:'upper-mids', lo:2000, hi:4000,  cols:[9,10,11], sens:1.2 },
+    { name:'presence',   lo:4000, hi:6000,  cols:[12,13],   sens:1.6 },
+    { name:'brilliance', lo:6000, hi:16000, cols:[14,15],   sens:2.0 },
+];
+  // Assign each band a horizontal strip of rows, stacked bottom (low freq) to top (high freq).
+  // Row counts per band, bottom-up, summing to GRID_SIZE.
+  const bandRowCounts = [2, 2, 2, 3, 3, 2, 2];
+  {
+    let cursor = 0; // rows-from-bottom cursor
+    bands.forEach((b, i)=>{
+      b.rowsFromBottom = [];
+      for(let k=0; k<bandRowCounts[i]; k++){
+        b.rowsFromBottom.push(cursor);
+        cursor++;
+      }
+    });
+  }
+
+  // Convert a "rows from bottom" index into the actual cells[] row index (cells[0] is the top row)
+  function gridRowFor(rowFromBottom){
+    return GRID_SIZE - 1 - rowFromBottom;
+  }
+
+  // Precompute the full list of [gridRow, col] coordinates belonging to each band,
+  // across every column, since lighting is now random within the band's row strip.
+  bands.forEach(b=>{
+    b.coords = [];
+    b.rowsFromBottom.forEach(rfb=>{
+      const gridRow = gridRowFor(rfb);
+      for(let col=0; col<GRID_SIZE; col++){
+        b.coords.push([gridRow, col]);
+      }
+    });
+  });
+
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  const KEY_COLORS = [
+    [255, 80, 80],
+    [255, 145, 70],
+    [255, 205, 70],
+    [190, 235, 80],
+    [90, 220, 120],
+    [70, 215, 180],
+    [70, 190, 235],
+    [80, 135, 255],
+    [125, 95, 255],
+    [185, 90, 245],
+    [230, 85, 210],
+    [255, 90, 150]
+  ];
+
+  const INSTRUMENT_COLORS = {
+    bass: [255, 70, 70],
+    vocals: [80, 150, 255],
+    trumpet: [255, 175, 45],
+    cymbal: [255, 255, 255]
+  };
+
+  function bandIndex(name){
+    return bands.findIndex(b => b.name === name);
+  }
+
+  function instrumentLevels(){
+    const bassLevel = levels[bandIndex('bass')];
+    const midsLevel = levels[bandIndex('mids')];
+    const upperMids = levels[bandIndex('upper-mids')];
+    const presence = levels[bandIndex('presence')];
+    const brilliance = levels[bandIndex('brilliance')];
+
+    return {
+      bassLevel,
+      midsLevel,
+      upperMids,
+      presence,
+      brilliance,
+      trumpetStrength: upperMids * 0.6 + presence * 0.4
+    };
+  }
+
+  function colorForBand(bandName, gridRow, inst){
+    if(bandName === 'bass' && inst.bassLevel > 0.18){
+      return INSTRUMENT_COLORS.bass;
+    }
+
+    if((bandName === 'upper-mids' || bandName === 'presence') && inst.trumpetStrength > 0.35){
+      return INSTRUMENT_COLORS.trumpet;
+    }
+
+    if(bandName === 'mids' && inst.midsLevel > 0.30){
+      return INSTRUMENT_COLORS.vocals;
+    }
+
+    if(bandName === 'brilliance' && inst.brilliance > 0.48){
+      return INSTRUMENT_COLORS.cymbal;
+    }
+
+    return colorForRow(gridRow);
+  }
+
+  const majorProfile = [6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88];
+  const minorProfile = [6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+
+  let detectedRoot = 0;
+  let detectedMode = 'major';
+  let keyConfidence = 0;
+  let chromaSmooth = new Array(12).fill(0);
+  let lastKeyUpdate = 0;
+
+  let highNoteCells = [];
+  const HIGH_NOTE_THRESHOLD = 0.25;
+
+  function rotateProfile(profile, root){
+    const out = new Array(12);
+    for(let i=0;i<12;i++) out[(i + root) % 12] = profile[i];
+    return out;
+  }
+
+  function correlation(a, b){
+    let aMean = a.reduce((s,v)=>s+v,0) / a.length;
+    let bMean = b.reduce((s,v)=>s+v,0) / b.length;
+    let num = 0, da = 0, db = 0;
+    for(let i=0;i<a.length;i++){
+      const x = a[i] - aMean;
+      const y = b[i] - bMean;
+      num += x * y;
+      da += x * x;
+      db += y * y;
+    }
+    const denom = Math.sqrt(da * db);
+    return denom ? num / denom : 0;
+  }
+
+  function updateDetectedKey(){
+    if(!audioCtx || !analyser) return;
+
+    const chroma = new Array(12).fill(0);
+    const binHz = audioCtx.sampleRate / analyser.fftSize;
+
+    for(let bin=1; bin<dataArray.length; bin++){
+      const freq = bin * binHz;
+      if(freq < 55 || freq > 5000) continue;
+
+      const magnitude = dataArray[bin] / 255;
+      if(magnitude < 0.08) continue;
+
+      const midi = Math.round(69 + 12 * Math.log2(freq / 440));
+      const pitchClass = ((midi % 12) + 12) % 12;
+      chroma[pitchClass] += magnitude * magnitude;
+    }
+
+    for(let i=0;i<12;i++){
+      chromaSmooth[i] = chromaSmooth[i] * 0.92 + chroma[i] * 0.08;
+    }
+
+    let bestScore = -Infinity;
+    let bestRoot = detectedRoot;
+    let bestMode = detectedMode;
+
+    for(let root=0; root<12; root++){
+      const majScore = correlation(chromaSmooth, rotateProfile(majorProfile, root));
+      if(majScore > bestScore){
+        bestScore = majScore;
+        bestRoot = root;
+        bestMode = 'major';
+      }
+
+      const minScore = correlation(chromaSmooth, rotateProfile(minorProfile, root));
+      if(minScore > bestScore){
+        bestScore = minScore;
+        bestRoot = root;
+        bestMode = 'minor';
+      }
+    }
+
+    if(bestScore > 0.18){
+      detectedRoot = bestRoot;
+      detectedMode = bestMode;
+      keyConfidence = bestScore;
+    }
+  }
+
+  function colorForRow(gridRow){
+    const base = KEY_COLORS[detectedRoot];
+    const rowFromBottom = GRID_SIZE - 1 - gridRow;
+    const t = rowFromBottom / (GRID_SIZE - 1);
+
+    const modeBrightness = detectedMode === 'minor' ? 0.78 : 1;
+    const brightness = (0.55 + t * 0.45) * modeBrightness;
+
+    return [
+      Math.round(base[0] * brightness),
+      Math.round(base[1] * brightness),
+      Math.round(base[2] * brightness)
+    ];
+  }
+
+  const levels = new Array(bands.length).fill(0); // smoothed 0..1
+
+  let audioCtx, analyser, dataArray;
+  let micStream, micSource, fileSource;
+  let rafId;
+  let mode = null; // 'mic' | 'file' | null
+
+  function ensureAudioCtx(){
+    if(!audioCtx){
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.25;
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+      bands.forEach(b=>{
+        b.binLo = freqToBin(b.lo, audioCtx.sampleRate, analyser.fftSize);
+        b.binHi = Math.max(b.binLo+1, freqToBin(b.hi, audioCtx.sampleRate, analyser.fftSize));
+      });
+    }
+    if(audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function freqToBin(freq, sampleRate, fftSize){
+    const nyquist = sampleRate / 2;
+    return Math.round((freq / nyquist) * (fftSize / 2));
+  }
+
+  function disconnectSources(){
+    if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource = null; }
+    if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; }
+    // fileSource stays connected across pause/play, only torn down on full stop
+  }
+
+  async function startMic(){
+    try{
+      stopFile(true);
+      ensureAudioCtx();
+      statusEl.textContent = 'Requesting microphone…';
+      micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      micSource = audioCtx.createMediaStreamSource(micStream);
+      micSource.connect(analyser);
+      mode = 'mic';
+      micBtn.classList.add('active');
+      playerWrap.style.display = 'none';
+      statusEl.textContent = 'Listening to microphone…';
+      if(!rafId) loop();
+    }catch(err){
+      statusEl.textContent = 'Microphone access denied or unavailable.';
+      console.error(err);
+    }
+  }
+
+  function stopMic(){
+    if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource = null; }
+    if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; }
+    micBtn.classList.remove('active');
+    if(mode === 'mic') mode = null;
+  }
+
+  function loadFile(file){
+    stopMic();
+    ensureAudioCtx();
+    const url = URL.createObjectURL(file);
+    audioEl.src = url;
+    playerWrap.style.display = 'block';
+    statusEl.textContent = 'Loaded: ' + file.name;
+
+    if(!fileSource){
+      fileSource = audioCtx.createMediaElementSource(audioEl);
+      fileSource.connect(analyser);
+      analyser.connect(audioCtx.destination);
+    }
+    mode = 'file';
+    audioEl.play().catch(()=>{ statusEl.textContent = 'Press play to start.'; });
+    if(!rafId) loop();
+  }
+
+  function stopFile(silent){
+    audioEl.pause();
+    audioEl.currentTime = 0;
+    if(!silent){
+      playerWrap.style.display = 'none';
+      statusEl.textContent = 'Idle';
+    }
+    if(mode === 'file') mode = null;
+  }
+
+  function stopAll(){
+    stopMic();
+    stopFile(false);
+    if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
+    clearGrid();
+    statusEl.textContent = 'Idle';
+  }
+
+  function clearGrid(){
+    for(let r=0;r<GRID_SIZE;r++){
+      for(let c=0;c<GRID_SIZE;c++){
+        setCell(cells[r][c], 0);
+      }
+    }
+  }
+
+  function setCell(div, intensity, color){
+    if(intensity <= 0.02){
+      div.style.background = 'var(--cell-off)';
+      div.style.boxShadow = 'none';
+      return;
+    }
+    const [r,g,b] = color || [255,255,255];
+    const alpha = Math.min(1, intensity);
+    div.style.background = `rgba(${r},${g},${b}, ${0.25 + alpha*0.75})`;
+    const blur = 4 + alpha*14;
+    const spread = alpha*3;
+    div.style.boxShadow = `0 0 ${blur}px ${spread}px rgba(${r},${g},${b}, ${alpha*0.9})`;
+  }
+
+  function shuffle(arr){
+    for(let i=arr.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i],arr[j]] = [arr[j],arr[i]];
+    }
+    return arr;
+  }
+
+  function loop(){
+    if(!mode){ rafId = null; return; }
+    analyser.getByteFrequencyData(dataArray);
+
+    const now = performance.now();
+    if(now - lastKeyUpdate > 300){
+      updateDetectedKey();
+      lastKeyUpdate = now;
+
+      if(keyConfidence > 0.18){
+        const keyLabel = NOTE_NAMES[detectedRoot] + ' ' + detectedMode;
+        if(mode === 'mic'){
+          statusEl.textContent = 'Listening • ' + keyLabel;
+        } else if(mode === 'file' && !audioEl.paused){
+          statusEl.textContent = 'Playing • ' + keyLabel;
+        }
+      }
+    }
+
+    bands.forEach((b, i)=>{
+      let sum = 0, count = 0;
+      for(let bin=b.binLo; bin<=b.binHi && bin<dataArray.length; bin++){
+        sum += dataArray[bin];
+        count++;
+      }
+      const avg = count ? sum / count : 0;
+      const norm = Math.min(1, (avg / 255) * b.sens);
+      if(norm > levels[i]){
+        levels[i] = levels[i] + (norm - levels[i]) * 0.7;
+      } else {
+        levels[i] = levels[i] + (norm - levels[i]) * 0.2;
+      }
+    });
+
+    const inst = instrumentLevels();
+
+    // Reset every cell, then randomly light a proportional number of cells per band
+    for(let r=0;r<GRID_SIZE;r++){
+      for(let c=0;c<GRID_SIZE;c++){
+        setCell(cells[r][c], 0);
+      }
+    }
+
+    bands.forEach((b, i)=>{
+      const level = levels[i]; // 0..1
+
+      if(b.name === 'bass'){
+        if(level > 0.035){
+          const bassIntensity = Math.max(0.3, Math.min(1, level));
+          for(let row=GRID_SIZE-2; row<GRID_SIZE; row++){
+            for(let col=0; col<GRID_SIZE; col++){
+              setCell(cells[row][col], bassIntensity, colorForBand('bass', row, inst));
+            }
+          }
+        }
+        return;
+      }
+
+      const totalCells = b.coords.length;
+      const litCount = Math.round(level * totalCells);
+      if(litCount <= 0) return;
+      const picked = shuffle(b.coords.slice()).slice(0, litCount);
+      picked.forEach(([row, col])=>{
+        const intensity = Math.max(0.3, Math.min(1, level * (0.6 + Math.random()*0.6)));
+        setCell(cells[row][col], intensity, colorForBand(b.name, row, inst));
+      });
+    });
+
+    const highLevel = Math.max(
+      levels[bandIndex('presence')],
+      levels[bandIndex('brilliance')]
+    );
+
+    if(highLevel > HIGH_NOTE_THRESHOLD){
+      let whiteBoxCount = 1;
+
+      if(highLevel > 0.55){
+        whiteBoxCount = 3;
+      } else if(highLevel > 0.38){
+        whiteBoxCount = 2;
+      }
+
+      while(highNoteCells.length < whiteBoxCount){
+        const candidate = {
+          row: Math.floor(Math.random() * GRID_SIZE),
+          col: Math.floor(Math.random() * GRID_SIZE)
+        };
+
+        const duplicate = highNoteCells.some(
+          cell => cell.row === candidate.row && cell.col === candidate.col
+        );
+
+        if(!duplicate){
+          highNoteCells.push(candidate);
+        }
+      }
+
+      if(highNoteCells.length > whiteBoxCount){
+        highNoteCells = highNoteCells.slice(0, whiteBoxCount);
+      }
+
+      highNoteCells.forEach(cell=>{
+        setCell(
+          cells[cell.row][cell.col],
+          1,
+          [255,255,255]
+        );
+      });
+    } else {
+      highNoteCells = [];
+    }
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  micBtn.addEventListener('click', ()=>{
+    if(mode === 'mic'){ stopMic(); statusEl.textContent = 'Idle'; clearGrid(); }
+    else startMic();
+  });
+
+  stopBtn.addEventListener('click', stopAll);
+
+  fileInput.addEventListener('change', (e)=>{
+    const file = e.target.files && e.target.files[0];
+    if(file) loadFile(file);
+  });
+
+  dropZone.addEventListener('click', ()=>fileInput.click());
+
+  dropZone.addEventListener('dragover', (e)=>{
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+  });
+
+  dropZone.addEventListener('dragleave', ()=>{
+    dropZone.classList.remove('dragover');
+  });
+
+  dropZone.addEventListener('drop', (e)=>{
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if(file) loadFile(file);
+  });
+
+  audioEl.addEventListener('ended', ()=>{
+    statusEl.textContent = 'Playback finished.';
+  });
+})();
+</script>
+</body>
+</html>
